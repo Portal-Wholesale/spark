@@ -85,6 +85,11 @@ end
 
 Persisted values can be retrieved at runtime via `Spark.Dsl.Extension.get_persisted/3`.
 
+Persisted values are compiled into the module, so keep them small. Persisted state larger than
+`config :spark, :persisted_attribute_threshold` (1,000,000 bytes by default) is stored in the
+module's attributes chunk and decoded on first access instead; see "Large persisted state" in
+`Spark.Dsl`.
+
 ## Verifiers
 
 Verifiers validate DSL state after the module has been compiled. They are read-only — they cannot modify the DSL state, only return `:ok`, `{:error, term}`, or `{:warn, warning}`. Because verifiers run post-compilation, they can safely reference other modules without creating compile-time dependencies between them.

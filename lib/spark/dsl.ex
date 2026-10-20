@@ -75,6 +75,35 @@ defmodule Spark.Dsl do
   ## Schemas/Data Types
 
   For more information, see `Spark.Options`.
+
+  ## Large persisted state
+
+  A DSL module's persisted state (see `Spark.Dsl.Transformer.persist/3`) is
+  normally compiled into the module as a literal returned by `persisted/0`.
+  Compile time and compiler memory grow with the size of that literal, so a
+  persister that stores a very large term (for example an application-wide
+  manifest) can make one module take minutes and gigabytes to compile.
+
+  When the persisted state is larger than a threshold, measured with
+  `:erlang.external_size/1`, Spark stores it in the module's attributes chunk
+  instead. It is decoded on first access and cached in `:persistent_term`, so
+  `persisted/0`, `persisted/2`, `fetch_persisted/1` and
+  `Spark.Dsl.Extension.get_persisted/3` return the same values as before. The
+  first access pays the decode; later accesses do not copy the value.
+
+  The threshold defaults to 1,000,000 bytes. It only changes how the state is
+  stored, never what is returned, and is read when a DSL module compiles:
+
+  ```elixir
+  # config/config.exs
+  config :spark, :persisted_attribute_threshold, 1_000_000
+
+  # always compile persisted state into `persisted/0`
+  config :spark, :persisted_attribute_threshold, :infinity
+  ```
+
+  Tools that strip `.beam` files must keep the `Attr` chunk for modules that
+  use this storage. `mix release` keeps it; `:beam_lib.strip/1` does not.
   """
 
   @type opts :: keyword()
@@ -634,9 +663,23 @@ defmodule Spark.Dsl do
           unquote(@spark_dsl_config_quoted)
         end
 
-        @doc false
-        def persisted do
-          Spark.Dsl.opaque(@persisted)
+        if Spark.Dsl.__persist_as_attribute__?(@persisted) do
+          # Large persisted state is stored in the module's attributes chunk
+          # instead of being compiled into `persisted/0` as a literal. See
+          # "Large persisted state" in the `Spark.Dsl` docs.
+          Module.register_attribute(__MODULE__, :spark_persisted, persist: true)
+          @spark_persisted @persisted
+          @spark_persisted_token Spark.Dsl.__persisted_token__(@persisted)
+
+          @doc false
+          def persisted do
+            Spark.Dsl.__persisted_from_attribute__(__MODULE__, @spark_persisted_token)
+          end
+        else
+          @doc false
+          def persisted do
+            Spark.Dsl.opaque(@persisted)
+          end
         end
 
         cond do
@@ -664,6 +707,86 @@ defmodule Spark.Dsl do
   # full type isn't stored in the signature of the accessor (or of every function
   # that returns its result), which would otherwise bloat compiled modules.
   def opaque(value), do: value
+
+  @default_persisted_attribute_threshold 1_000_000
+
+  @doc false
+  # Whether a DSL module's persisted state is large enough to be stored in the
+  # module's attributes chunk rather than compiled into `persisted/0`.
+  def __persist_as_attribute__?(persisted) do
+    case persisted_attribute_threshold() do
+      :infinity -> false
+      threshold -> :erlang.external_size(persisted) > threshold
+    end
+  end
+
+  defp persisted_attribute_threshold do
+    case Application.get_env(
+           :spark,
+           :persisted_attribute_threshold,
+           @default_persisted_attribute_threshold
+         ) do
+      threshold when (is_integer(threshold) and threshold >= 0) or threshold == :infinity ->
+        threshold
+
+      other ->
+        raise ArgumentError,
+              "expected `config :spark, :persisted_attribute_threshold` to be a " <>
+                "non-negative integer (bytes) or `:infinity`, got: #{inspect(other)}"
+    end
+  end
+
+  @doc false
+  # Identifies one version of a module's persisted state, so a value cached for
+  # an earlier version of a recompiled module is never served.
+  def __persisted_token__(persisted) do
+    persisted
+    |> :erlang.term_to_binary()
+    |> :erlang.md5()
+  end
+
+  @doc false
+  # Reads persisted state stored in the module's attributes chunk. The chunk is
+  # decoded on every `module_info(:attributes)` call, so the value is decoded
+  # once and kept in `:persistent_term`, which serves it without copying.
+  def __persisted_from_attribute__(module, token) do
+    key = {__MODULE__, :persisted, module}
+
+    case :persistent_term.get(key, nil) do
+      {^token, persisted} ->
+        persisted
+
+      _ ->
+        # Serialize the first load so concurrent callers decode the value once.
+        :global.trans(
+          {key, self()},
+          fn ->
+            case :persistent_term.get(key, nil) do
+              {^token, persisted} ->
+                persisted
+
+              _ ->
+                persisted = persisted_attribute!(module)
+                :persistent_term.put(key, {token, persisted})
+                persisted
+            end
+          end,
+          [node()]
+        )
+    end
+  end
+
+  defp persisted_attribute!(module) do
+    case List.keyfind(module.module_info(:attributes), :spark_persisted, 0) do
+      {:spark_persisted, [persisted]} ->
+        persisted
+
+      nil ->
+        raise "the persisted DSL state of `#{inspect(module)}` is stored in its " <>
+                "attributes chunk, but the loaded module has no `spark_persisted` " <>
+                "attribute. Was the chunk stripped from the .beam file?"
+    end
+  end
 
   @doc false
   def __verify_spark_dsl__(parent, module, opts, extensions, env) do
