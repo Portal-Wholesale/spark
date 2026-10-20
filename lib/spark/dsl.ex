@@ -86,7 +86,10 @@ defmodule Spark.Dsl do
 
   When the persisted state is larger than a threshold, measured with
   `:erlang.external_size/1`, Spark stores it in the module's attributes chunk
-  instead. It is decoded on first access and cached in `:persistent_term`, so
+  instead, as a compressed external term (`:erlang.term_to_binary/2` with
+  `compressed: 6`). Persisted state is typically highly repetitive, so this
+  keeps the `.beam` file and the loaded module's memory small. It is decoded
+  on first access and cached in `:persistent_term`, so
   `persisted/0`, `persisted/2`, `fetch_persisted/1` and
   `Spark.Dsl.Extension.get_persisted/3` return the same values as before. The
   first access pays the decode; later accesses do not copy the value.
@@ -668,7 +671,7 @@ defmodule Spark.Dsl do
           # instead of being compiled into `persisted/0` as a literal. See
           # "Large persisted state" in the `Spark.Dsl` docs.
           Module.register_attribute(__MODULE__, :spark_persisted, persist: true)
-          @spark_persisted @persisted
+          @spark_persisted Spark.Dsl.__encode_persisted__(@persisted)
           @spark_persisted_token Spark.Dsl.__persisted_token__(@persisted)
 
           @doc false
@@ -746,6 +749,13 @@ defmodule Spark.Dsl do
   end
 
   @doc false
+  # Large persisted state is highly repetitive (for example, lookup maps that
+  # repeat the structs of a manifest), so it is stored compressed.
+  def __encode_persisted__(persisted) do
+    :erlang.term_to_binary(persisted, compressed: 6)
+  end
+
+  @doc false
   # Reads persisted state stored in the module's attributes chunk. The chunk is
   # decoded on every `module_info(:attributes)` call, so the value is decoded
   # once and kept in `:persistent_term`, which serves it without copying.
@@ -778,8 +788,8 @@ defmodule Spark.Dsl do
 
   defp persisted_attribute!(module) do
     case List.keyfind(module.module_info(:attributes), :spark_persisted, 0) do
-      {:spark_persisted, [persisted]} ->
-        persisted
+      {:spark_persisted, [encoded]} when is_binary(encoded) ->
+        :erlang.binary_to_term(encoded)
 
       nil ->
         raise "the persisted DSL state of `#{inspect(module)}` is stored in its " <>

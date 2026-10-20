@@ -51,7 +51,10 @@ defmodule Spark.LargePersistedTest do
 
     attributes = define(module, payload)
 
-    assert [%{payload: ^payload}] = Keyword.fetch!(attributes, :spark_persisted)
+    assert [encoded] = Keyword.fetch!(attributes, :spark_persisted)
+    assert is_binary(encoded)
+    assert %{payload: ^payload} = :erlang.binary_to_term(encoded)
+    assert byte_size(encoded) < :erlang.external_size(:erlang.binary_to_term(encoded))
     assert module.persisted().payload == payload
     assert module.persisted(:payload, nil) == payload
     assert module.persisted(:missing, :default) == :default
