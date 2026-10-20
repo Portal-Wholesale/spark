@@ -87,8 +87,8 @@ Persisted values can be retrieved at runtime via `Spark.Dsl.Extension.get_persis
 
 Persisted values are compiled into the module, so keep them small. Persisted state larger than
 `config :spark, :persisted_attribute_threshold` (1,000,000 bytes by default) is stored in the
-module's attributes chunk and decoded on first access instead; see "Large persisted state" in
-`Spark.Dsl`.
+module's attributes chunk as a compressed binary and decoded on first access instead; see
+"Large persisted state" in `Spark.Dsl`.
 
 ## Verifiers
 
