@@ -282,28 +282,21 @@ if Code.ensure_loaded?(Sourceror) do
     defp de_paren_at_level(node, _, _, _, _, _), do: node
 
     defp section_entities_at_path(section, extensions, path) do
-      patched =
-        extensions
-        |> Enum.flat_map(& &1.dsl_patches())
-        |> Enum.filter(fn
-          %Spark.Dsl.Patch.AddEntity{section_path: ^path} -> true
-          _ -> false
-        end)
-        |> Enum.map(& &1.entity)
+      section.entities ++ patched_entities(extensions, path)
+    end
 
-      section.entities ++ patched
+    defp patched_entities(extensions, section_path) do
+      extensions
+      |> Enum.flat_map(& &1.dsl_patches())
+      |> Enum.filter(fn
+        %Spark.Dsl.Patch.AddEntity{section_path: ^section_path} -> true
+        _ -> false
+      end)
+      |> Enum.map(& &1.entity)
     end
 
     defp section_level_builders(section, entities) do
-      section_option_builders(section) ++
-        Enum.flat_map(entities, fn entity ->
-          arg_count = Enum.count(entity.args)
-          non_optional = Enum.count(entity.args, &is_atom/1)
-
-          Enum.flat_map(non_optional..arg_count, fn n ->
-            [{entity.name, n}, {entity.name, n + 1}]
-          end)
-        end)
+      section_option_builders(section) ++ Enum.flat_map(entities, &entity_arg_builders/1)
     end
 
     defp entity_level_builders(entity, nested_entities) do
@@ -314,17 +307,7 @@ if Code.ensure_loaded?(Sourceror) do
         |> Keyword.drop(entity_args_to_drop)
         |> Enum.map(fn {key, _} -> {key, 1} end)
 
-      nested_builders =
-        Enum.flat_map(nested_entities, fn nested ->
-          arg_count = Enum.count(nested.args)
-          non_optional = Enum.count(nested.args, &is_atom/1)
-
-          Enum.flat_map(non_optional..arg_count, fn n ->
-            [{nested.name, n}, {nested.name, n + 1}]
-          end)
-        end)
-
-      option_builders ++ nested_builders
+      option_builders ++ Enum.flat_map(nested_entities, &entity_arg_builders/1)
     end
 
     defp section_children(section, entities) do
@@ -403,14 +386,9 @@ if Code.ensure_loaded?(Sourceror) do
             []
         end
         |> List.wrap()
-        |> Enum.filter(&is_atom/1)
-        |> Enum.flat_map(fn extension ->
-          if Code.ensure_loaded?(extension) and
-               Spark.implements_behaviour?(extension, Spark.Dsl.Extension) do
-            [extension]
-          else
-            []
-          end
+        |> Enum.filter(fn extension ->
+          is_atom(extension) and Code.ensure_loaded?(extension) and
+            Spark.implements_behaviour?(extension, Spark.Dsl.Extension)
         end)
       end)
       |> Enum.concat(config[:extensions] || [])
@@ -466,38 +444,13 @@ if Code.ensure_loaded?(Sourceror) do
     end
 
     defp all_patch_entity_builders(extensions, section, path) do
-      match_path = path ++ [section.name]
-
       extensions
-      |> Enum.flat_map(& &1.dsl_patches())
-      |> tap(fn patches ->
-        Enum.map(patches, & &1.section_path)
-      end)
-      |> Enum.filter(fn
-        %Spark.Dsl.Patch.AddEntity{section_path: ^match_path} ->
-          true
-
-        _ ->
-          false
-      end)
-      |> Enum.map(& &1.entity)
+      |> patched_entities(path ++ [section.name])
       |> Enum.flat_map(&entity_option_builders/1)
     end
 
     defp section_entity_builders(section, extensions, path) do
-      match_path = path ++ [section.name]
-
-      mixed_in_entities =
-        extensions
-        |> Enum.flat_map(& &1.dsl_patches())
-        |> Enum.filter(fn
-          %Spark.Dsl.Patch.AddEntity{section_path: ^match_path} ->
-            true
-
-          _ ->
-            false
-        end)
-        |> Enum.map(& &1.entity)
+      mixed_in_entities = patched_entities(extensions, path ++ [section.name])
 
       Enum.flat_map(section.entities ++ mixed_in_entities, fn entity ->
         entity_builders(entity)
@@ -505,12 +458,17 @@ if Code.ensure_loaded?(Sourceror) do
     end
 
     def entity_builders(entity) do
+      entity_arg_builders(entity) ++ flat_map_nested_entities(entity, &entity_builders/1)
+    end
+
+    defp entity_arg_builders(entity) do
       arg_count = Enum.count(entity.args)
       non_optional_arg_count = Enum.count(entity.args, &is_atom/1)
 
-      non_optional_arg_count..arg_count
-      |> Enum.flat_map(&[{entity.name, &1}, {entity.name, &1 + 1}])
-      |> Enum.concat(flat_map_nested_entities(entity, &entity_builders/1))
+      Enum.flat_map(
+        non_optional_arg_count..arg_count,
+        &[{entity.name, &1}, {entity.name, &1 + 1}]
+      )
     end
 
     defp all_entity_option_builders(section) do

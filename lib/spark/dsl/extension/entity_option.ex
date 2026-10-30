@@ -5,40 +5,22 @@
 defmodule Spark.Dsl.Extension.EntityOption do
   @moduledoc false
 
-  def value_and_function(
-        value,
-        field,
-        type,
-        caller,
-        modules,
-        no_depend_modules,
-        depend_on_only_behaviour_modules \\ []
-      ) do
-    value =
-      case type do
-        :quoted ->
-          Macro.escape(value)
-
-        _ ->
-          value
+  def expand(%Spark.Dsl.Extension.OptionMacro.Config{name: key} = config, value, caller) do
+    Spark.Dsl.Extension.OptionMacro.expand(
+      config,
+      value,
+      caller,
+      fn value, anno ->
+        quote generated: true do
+          Spark.Dsl.Extension.EntityOption.set_entity_option(
+            __MODULE__,
+            unquote(key),
+            unquote(value),
+            unquote(anno)
+          )
+        end
       end
-
-    value =
-      cond do
-        field in modules ->
-          Spark.Dsl.Extension.expand_alias(value, caller)
-
-        field in no_depend_modules ->
-          Spark.Dsl.Extension.expand_alias_no_require(value, caller)
-
-        field in depend_on_only_behaviour_modules ->
-          Spark.Dsl.Extension.expand_alias_behaviour_only(value, caller)
-
-        true ->
-          value
-      end
-
-    Spark.CodeHelpers.lift_functions(value, field, caller)
+    )
   end
 
   def set_entity_option(module, key, value, anno \\ nil) do
@@ -46,7 +28,6 @@ defmodule Spark.Dsl.Extension.EntityOption do
     current_opts = Process.get({:builder_opts, nested_entity_path}, [])
 
     if Keyword.has_key?(current_opts, key) do
-      # Get the annotation for this entity from the Process store
       entity_anno = Process.get({:builder_anno, nested_entity_path})
 
       raise Spark.Error.DslError,

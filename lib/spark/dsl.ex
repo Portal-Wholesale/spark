@@ -396,7 +396,14 @@ defmodule Spark.Dsl do
 
             @their_opt_schema their_opt_schema
 
-            @opts opts
+            @_spark_dsl_opts opts
+
+            # TODO: stop setting `@opts` in the next major release. Downstream DSLs read it from
+            # injected code. An `@opts` that another library set first stays intact.
+            unless Module.has_attribute?(__MODULE__, :opts) do
+              Module.put_attribute(__MODULE__, :opts, opts)
+            end
+
             @before_compile Spark.Dsl
 
             Module.register_attribute(__MODULE__, :spark_is, persist: true)
@@ -488,8 +495,17 @@ defmodule Spark.Dsl do
 
   defmacro __before_compile__(env) do
     parent = Module.get_attribute(env.module, :spark_parent)
-    opts = Module.get_attribute(env.module, :opts)
+    opts = Module.get_attribute(env.module, :_spark_dsl_opts)
     parent_code = parent.handle_before_compile(opts)
+
+    # `@after_verify` can run in a checker process that cannot see this
+    # process's dictionary, so capture the collector now. Charlist because
+    # Elixir warns on a pid literal.
+    captured_collector =
+      case Process.get({Spark.Dsl, :test_collector}) do
+        pid when is_pid(pid) -> :erlang.pid_to_list(pid)
+        _ -> nil
+      end
 
     verify_code =
       quote generated: true do
@@ -500,9 +516,10 @@ defmodule Spark.Dsl do
           Spark.Dsl.__verify_spark_dsl__(
             unquote(parent),
             module,
-            @opts,
+            @_spark_dsl_opts,
             @extensions,
-            __ENV__
+            __ENV__,
+            unquote(captured_collector)
           )
         end
       end
@@ -693,11 +710,16 @@ defmodule Spark.Dsl do
             @moduledoc """
             #{@moduledoc}
 
-            #{Spark.Dsl.Extension.explain(parent, @opts, @extensions, @spark_dsl_config)}
+            #{Spark.Dsl.Extension.explain(parent, @_spark_dsl_opts, @extensions, @spark_dsl_config)}
             """
 
           true ->
-            @moduledoc Spark.Dsl.Extension.explain(parent, @opts, @extensions, @spark_dsl_config)
+            @moduledoc Spark.Dsl.Extension.explain(
+                         parent,
+                         @_spark_dsl_opts,
+                         @extensions,
+                         @spark_dsl_config
+                       )
         end
       end
 
@@ -799,8 +821,9 @@ defmodule Spark.Dsl do
   end
 
   @doc false
-  def __verify_spark_dsl__(parent, module, opts, extensions, env) do
+  def __verify_spark_dsl__(parent, module, opts, extensions, env, captured_collector \\ nil) do
     parent.verify(module, opts)
+    collector = captured_collector && :erlang.list_to_pid(captured_collector)
 
     transformers_to_run =
       extensions
@@ -820,8 +843,6 @@ defmodule Spark.Dsl do
               []
 
             {:warn, warnings} ->
-              collector = Process.get({Spark.Dsl, :test_collector})
-
               normalized =
                 warnings
                 |> List.wrap()
@@ -853,7 +874,6 @@ defmodule Spark.Dsl do
       end)
 
     final_errors = Enum.uniq(errors)
-    collector = Process.get({Spark.Dsl, :test_collector})
 
     cond do
       final_errors == [] ->

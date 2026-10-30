@@ -5,29 +5,47 @@
 defmodule Spark.Dsl.Extension.SectionOption do
   @moduledoc false
 
-  def value_and_function(value, field, type, caller, section_modules, section_no_depend_modules) do
-    value =
-      case type do
-        :quoted ->
-          Macro.escape(value)
+  def expand(%Spark.Dsl.Extension.OptionMacro.Config{} = config, value, caller) do
+    %{name: field, path: section_path, extension: extension} = config
 
-        _ ->
-          value
+    Spark.Dsl.Extension.OptionMacro.expand(
+      config,
+      value,
+      caller,
+      fn value, anno ->
+        quote generated: true do
+          Spark.Dsl.Extension.SectionOption.set_section_option(
+            __MODULE__,
+            unquote(extension),
+            unquote(section_path),
+            unquote(field),
+            unquote(value),
+            unquote(anno)
+          )
+        end
       end
+    )
+  end
 
-    value =
-      cond do
-        field in section_modules ->
-          Spark.Dsl.Extension.expand_alias(value, caller)
+  def set_and_validate_options(dsl_config, section_path, module, schema) do
+    dsl_config
+    |> Map.put_new(section_path, Spark.Dsl.Extension.default_section_config())
+    |> Map.update!(section_path, fn config ->
+      validated_opts =
+        case Spark.Options.validate(Keyword.new(config[:opts] || []), schema) do
+          {:ok, opts} ->
+            opts
 
-        field in section_no_depend_modules ->
-          Spark.Dsl.Extension.expand_alias_no_require(value, caller)
+          {:error, error} ->
+            raise Spark.Error.DslError,
+              module: module,
+              message: error,
+              path: section_path,
+              location: config[:section_anno]
+        end
 
-        true ->
-          value
-      end
-
-    Spark.CodeHelpers.lift_functions(value, field, caller)
+      %{config | opts: validated_opts}
+    end)
   end
 
   def set_section_option(module, extension, section_path, field, value, anno \\ nil) do
