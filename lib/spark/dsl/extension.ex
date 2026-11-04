@@ -889,13 +889,9 @@ defmodule Spark.Dsl.Extension do
 
       Enum.each(sections, fn section ->
         Spark.Dsl.Extension.async_compile(agent_and_pid, fn ->
-          Extension.build_section(
-            agent_and_pid,
-            extension,
-            section,
-            [],
-            module_prefix
-          )
+          agent_and_pid
+          |> Extension.section_definitions(__MODULE__, module_prefix, extension, section, [])
+          |> Code.eval_quoted([], __ENV__)
         end)
       end)
 
@@ -989,6 +985,7 @@ defmodule Spark.Dsl.Extension do
   end
 
   @doc false
+  @deprecated "Spark builds sections itself. This macro will be removed in the next major release."
   defmacro build_section(
              agent,
              extension,
@@ -996,60 +993,16 @@ defmodule Spark.Dsl.Extension do
              path \\ [],
              module_prefix \\ nil
            ) do
-    quote bind_quoted: [
-            agent: agent,
-            section: section,
-            path: path,
-            extension: extension,
-            module_prefix: module_prefix
-          ],
-          generated: true do
-      alias Spark.Dsl
-
-      {section_modules, entity_modules, opts_module} =
-        Dsl.Extension.do_build_section(
-          agent,
-          module_prefix,
-          extension,
-          section,
-          path
-        )
-
-      @doc false
-      def __set_and_validate_options__(
-            dsl_config,
-            unquote(path ++ [section.name]) = section_path,
-            module,
-            extension
-          ) do
-        Spark.Dsl.Extension.SectionOption.set_and_validate_options(
-          dsl_config,
-          section_path,
-          module,
-          unquote(Macro.escape(Map.get(section, :schema, [])))
-        )
-      end
-
-      unless section.top_level? && path == [] do
-        defmacro unquote(section.name)(body) do
-          Spark.Dsl.Extension.Section.expand(
-            unquote(
-              Macro.escape(%Spark.Dsl.Extension.Section.Config{
-                opts_module: opts_module,
-                section_path: path ++ [section.name],
-                extension: extension,
-                entity_modules: entity_modules,
-                section_modules: section_modules,
-                imports: section.imports,
-                after_define: section.after_define,
-                module: __MODULE__
-              })
-            ),
-            body,
-            __CALLER__
-          )
-        end
-      end
+    quote generated: true do
+      unquote(agent)
+      |> Spark.Dsl.Extension.section_definitions(
+        __MODULE__,
+        unquote(module_prefix),
+        unquote(extension),
+        unquote(section),
+        unquote(path)
+      )
+      |> Code.eval_quoted([], __ENV__)
     end
   end
 
@@ -1084,6 +1037,59 @@ defmodule Spark.Dsl.Extension do
   end
 
   @doc false
+  def section_definitions(agent, module, module_prefix, extension, section, path) do
+    {section_modules, entity_modules, opts_module} =
+      do_build_section(agent, module_prefix, extension, section, path)
+
+    section_path = path ++ [section.name]
+
+    set_and_validate_options =
+      quote generated: true do
+        @doc false
+        def __set_and_validate_options__(
+              dsl_config,
+              unquote(section_path) = section_path,
+              module,
+              extension
+            ) do
+          Spark.Dsl.Extension.SectionOption.set_and_validate_options(
+            dsl_config,
+            section_path,
+            module,
+            unquote(Macro.escape(section.schema))
+          )
+        end
+      end
+
+    if section.top_level? && path == [] do
+      set_and_validate_options
+    else
+      config = %Spark.Dsl.Extension.Section.Config{
+        opts_module: opts_module,
+        section_path: section_path,
+        extension: extension,
+        entity_modules: entity_modules,
+        section_modules: section_modules,
+        imports: section.imports,
+        after_define: section.after_define,
+        module: module
+      }
+
+      quote generated: true do
+        unquote(set_and_validate_options)
+
+        defmacro unquote(section.name)(body) do
+          Spark.Dsl.Extension.Section.expand(
+            unquote(Macro.escape(config)),
+            body,
+            __CALLER__
+          )
+        end
+      end
+    end
+  end
+
+  @doc false
   def do_build_section(agent, mod, extension, section, path) do
     opts_mod_name =
       if section.schema == [] do
@@ -1113,11 +1119,7 @@ defmodule Spark.Dsl.Extension do
             []
           )
 
-        if entity.recursive_as do
-          [entity_mod | entity_modules]
-        else
-          [entity_mod | entity_modules]
-        end
+        [entity_mod | entity_modules]
       end)
 
     section_modules =
@@ -1131,16 +1133,16 @@ defmodule Spark.Dsl.Extension do
               mod_name,
               quote generated: true do
                 @moduledoc false
-                alias Spark.Dsl
 
-                require Dsl.Extension
-
-                Dsl.Extension.build_section(
-                  unquote(agent),
-                  unquote(extension),
-                  unquote(Macro.escape(nested_section)),
-                  unquote(path ++ [section.name]),
-                  unquote(mod)
+                unquote(
+                  section_definitions(
+                    agent,
+                    mod_name,
+                    mod,
+                    extension,
+                    nested_section,
+                    path ++ [section.name]
+                  )
                 )
               end,
               Macro.Env.location(__ENV__)
@@ -1166,22 +1168,7 @@ defmodule Spark.Dsl.Extension do
           }
         end
 
-      Module.create(
-        opts_mod_name,
-        quote generated: true, bind_quoted: [option_configs: Macro.escape(option_configs)] do
-          @moduledoc false
-          for option_config <- option_configs do
-            defmacro unquote(option_config.name)(value) do
-              Spark.Dsl.Extension.SectionOption.expand(
-                unquote(Macro.escape(option_config)),
-                value,
-                __CALLER__
-              )
-            end
-          end
-        end,
-        Macro.Env.location(__ENV__)
-      )
+      build_option_module(opts_mod_name, option_configs, Spark.Dsl.Extension.SectionOption)
     end
 
     {section_modules, entity_modules, opts_mod_name}
@@ -1267,13 +1254,15 @@ defmodule Spark.Dsl.Extension do
       depend_on_only_behaviour_modules: Map.get(entity, :depend_on_only_behaviour_modules, [])
     }
 
+    escaped_entity = Macro.escape(entity)
+
     body =
       quote generated: true, location: :keep do
         @moduledoc false
 
         def __build__(module, opts, nested_entities, anno, opts_anno) do
           Spark.Dsl.Extension.Entity.build!(
-            unquote(Macro.escape(entity)),
+            unquote(escaped_entity),
             unquote(section_path),
             module,
             opts,
@@ -1285,7 +1274,7 @@ defmodule Spark.Dsl.Extension do
 
         defmacro unquote(entity.name)(unquote_splicing(args), opts \\ nil) do
           Spark.Dsl.Extension.Entity.expand(
-            unquote(Macro.escape(entity)),
+            unquote(escaped_entity),
             unquote(Macro.escape(config)),
             [unquote_splicing(arg_vars)],
             opts,
@@ -1321,11 +1310,17 @@ defmodule Spark.Dsl.Extension do
         }
       end
 
+    build_option_module(module_name, option_configs, Spark.Dsl.Extension.EntityOption)
+
+    module_name
+  end
+
+  defp build_option_module(module_name, option_configs, expander) do
     macros =
       for option_config <- option_configs do
         quote generated: true do
           defmacro unquote(option_config.name)(value) do
-            Spark.Dsl.Extension.EntityOption.expand(
+            unquote(expander).expand(
               unquote(Macro.escape(option_config)),
               value,
               __CALLER__
@@ -1336,11 +1331,12 @@ defmodule Spark.Dsl.Extension do
 
     Module.create(
       module_name,
-      {:__block__, [], [quote(do: @moduledoc(false)) | macros]},
-      file: __ENV__.file
+      quote generated: true do
+        @moduledoc false
+        unquote_splicing(macros)
+      end,
+      Macro.Env.location(__ENV__)
     )
-
-    module_name
   end
 
   @doc false

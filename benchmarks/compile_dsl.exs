@@ -7,20 +7,31 @@
 #
 #     mix run benchmarks/compile_dsl.exs
 #
-# ENTITIES, OPTIONS and RUNS environment variables override the defaults.
+# ENTITIES, SECTIONS (nested sections), OPTIONS and RUNS environment variables override the
+# defaults. The generated DSL usage sets opt_1 everywhere and opt_2 in entities, so OPTIONS
+# must be at least 1, or at least 2 when ENTITIES is above 0.
 
 entities = String.to_integer(System.get_env("ENTITIES", "40"))
+sections = String.to_integer(System.get_env("SECTIONS", "10"))
 options = String.to_integer(System.get_env("OPTIONS", "15"))
 runs = String.to_integer(System.get_env("RUNS", "5"))
 
+if runs < 1 do
+  raise ArgumentError, "RUNS must be at least 1"
+end
+
+if options < 1 or (entities > 0 and options < 2) do
+  raise ArgumentError, "OPTIONS must be at least 1, or at least 2 when ENTITIES is above 0"
+end
+
 source = fn prefix ->
   schema =
-    for o <- 1..options do
+    for o <- 1..options//1 do
       ~s|opt_#{o}: [type: {:or, [:atom, :string, {:fun, 1}]}, doc: "Option #{o}."]|
     end
 
   entity_defs =
-    for e <- 1..entities do
+    for e <- 1..entities//1 do
       """
       %Spark.Dsl.Entity{
         name: :entity_#{e},
@@ -34,8 +45,22 @@ source = fn prefix ->
       """
     end
 
+  section_defs =
+    for s <- 1..sections//1 do
+      ~s|%Spark.Dsl.Section{name: :section_#{s}, schema: [#{Enum.join(schema, ", ")}]}|
+    end
+
+  section_usages =
+    for s <- 1..sections//1 do
+      """
+      section_#{s} do
+        opt_1 :a
+      end
+      """
+    end
+
   usages =
-    for e <- 1..entities do
+    for e <- 1..entities//1 do
       """
       entity_#{e} :e#{e} do
         opt_1 :a
@@ -51,7 +76,7 @@ source = fn prefix ->
   """
   defmodule #{prefix}.Target do
     defstruct [:name, :children, :__identifier__, :__spark_metadata__] ++
-                Enum.map(1..#{options}, &:"opt_\#{&1}")
+                Enum.map(1..#{options}//1, &:"opt_\#{&1}")
   end
 
   defmodule #{prefix}.Extension do
@@ -60,7 +85,8 @@ source = fn prefix ->
         %Spark.Dsl.Section{
           name: :items,
           schema: [#{Enum.join(schema, ", ")}],
-          entities: [#{Enum.map_join(entity_defs, ",\n", &String.trim/1)}]
+          entities: [#{Enum.map_join(entity_defs, ",\n", &String.trim/1)}],
+          sections: [#{Enum.join(section_defs, ",\n")}]
         }
       ]
   end
@@ -75,13 +101,14 @@ source = fn prefix ->
     items do
       opt_1 :a
       #{Enum.join(usages, "\n")}
+      #{Enum.join(section_usages, "\n")}
     end
   end
   """
 end
 
 results =
-  for run <- 1..runs do
+  for run <- 1..runs//1 do
     dir = Path.join(System.tmp_dir!(), "spark_compile_dsl_#{System.unique_integer([:positive])}")
     File.mkdir_p!(dir)
     file = Path.join(dir, "bench.ex")
@@ -110,9 +137,17 @@ results =
 
 times = results |> Enum.map(&elem(&1, 0)) |> Enum.sort()
 {_, module_count, bytes} = hd(results)
+middle = div(runs, 2)
+
+median =
+  if rem(runs, 2) == 1 do
+    Enum.at(times, middle)
+  else
+    (Enum.at(times, middle - 1) + Enum.at(times, middle)) / 2
+  end
 
 IO.puts("""
-#{entities} entities x #{options} options, #{runs} runs
-compile time: median #{Float.round(Enum.at(times, div(runs, 2)), 0)} ms, min #{Float.round(hd(times), 0)} ms
+#{entities} entities, #{sections} nested sections x #{options} options, #{runs} runs
+compile time: median #{Float.round(median, 0)} ms, min #{Float.round(hd(times), 0)} ms
 generated: #{module_count} modules, #{Float.round(bytes / 1024, 1)} KiB of BEAM
 """)
